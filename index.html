@@ -65,6 +65,24 @@
             transform: translateY(-2px);
             box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
         }
+        .btn-orange {
+            background-color: #f97316; /* Orange */
+            color: white;
+        }
+        .btn-orange:hover {
+            background-color: #ea580c; /* Mörkare orange */
+            transform: translateY(-2px);
+            box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+        }
+        .btn-blue {
+            background-color: #3b82f6; /* Blå */
+            color: white;
+        }
+        .btn-blue:hover {
+            background-color: #2563eb; /* Mörkare blå */
+            transform: translateY(-2px);
+            box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+        }
         .star {
             color: #fcd34d; /* Guldgul */
             font-size: 2.5rem;
@@ -97,6 +115,7 @@
         .attempts-list li {
             display: flex;
             justify-content: space-between;
+            align-items: center; /* Centrera vertikalt */
             padding: 0.5rem 0;
             border-bottom: 1px solid #e5e7eb;
         }
@@ -157,7 +176,10 @@
         <div id="game-screen" class="card hidden">
             <div class="flex justify-between items-center mb-4">
                 <div id="stars-display" class="flex"></div>
-                <button id="stop-game-btn" class="btn btn-secondary">Avsluta spel</button>
+                <div class="flex gap-2">
+                    <button id="pause-game-btn" class="btn btn-secondary"><i class="fas fa-pause"></i> Paus</button>
+                    <button id="stop-game-btn" class="btn btn-secondary"><i class="fas fa-times"></i> Avsluta</button>
+                </div>
             </div>
             <div id="word-display" class="word-display"></div>
             
@@ -169,7 +191,10 @@
                 </div>
             </div>
 
-            <button id="next-word-btn" class="btn btn-green hidden mt-4">Nästa ord</button>
+            <div class="flex flex-col sm:flex-row justify-center gap-4 mt-4">
+                <button id="next-word-btn" class="btn btn-green hidden">Nästa ord</button>
+                <button id="skip-word-btn" class="btn btn-orange">Hoppa över</button>
+            </div>
         </div>
 
         <div id="results-screen" class="card hidden">
@@ -183,7 +208,7 @@
 
     <script>
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        const SpeechGrammarList = window.SpeechGrammarList || window.webkitSpeechGrammarList;
+        const SpeechSynthesis = window.speechSynthesis; // Web Speech Synthesis API
         const SpeechRecognitionEvent = window.SpeechRecognitionEvent || window.webkitSpeechRecognitionEvent;
 
         const startScreen = document.getElementById('start-screen');
@@ -198,6 +223,7 @@
 
         const speechApiWarning = document.getElementById('speech-api-warning');
         const starsDisplay = document.getElementById('stars-display');
+        const pauseGameBtn = document.getElementById('pause-game-btn'); // Ny pausknapp
         const stopGameBtn = document.getElementById('stop-game-btn');
         const wordDisplay = document.getElementById('word-display');
         
@@ -208,23 +234,48 @@
         const listeningText = document.getElementById('listening-text');
 
         const nextWordBtn = document.getElementById('next-word-btn');
+        const skipWordBtn = document.getElementById('skip-word-btn'); // Ny hoppa över-knapp
         const attemptsList = document.getElementById('attempts-list');
         const finalStars = document.getElementById('final-stars');
         const playAgainBtn = document.getElementById('play-again-btn');
 
         let recognition;
         let currentWord = '';
-        let currentLanguage = 'sv-SE'; // Standard till svenska
+        let currentLanguage = 'sv-SE';
         let stars = 3;
         const maxStars = 5;
         const minStars = 0;
 
-        let userWords = []; // Här lagras användarens glosor
-        let wordsToPractice = []; // Ord som ska övas
-        let attempts = {};
+        let userWords = [];
+        let wordsToPractice = [];
+        let attempts = {}; // { 'ord': { correct: 0, total: 0, skipped: false }, ... }
         let masteredWords = new Set();
         let gameActive = false;
         let isListening = false;
+        let speechTimeout; // Används för automatisk nästa ord
+        let isPaused = false; // Ny flagga för pausfunktion
+
+        // För homografer, kan utökas med fler språk och ord vid behov
+        const homographMap = {
+            'sv-SE': {
+                'bank': ['bank', 'bänk'], // Exempel: "bank" som finansinstitut eller markbank
+                'glas': ['glas', 'klass'], // Exempel: "glas" (dricksglas) eller "glas" (material)
+                'fel': ['fel', 'fälla'], // "fel" (incorrect) vs "fäll" (fall/trap)
+                'sjuk': ['sjuk', 'sjukt'], // "sjuk" (ill) vs "sjukt" (sickly/crazy, adverb)
+                'bar': ['bar', 'barn'], // "bar" (naked/carried) vs "barn" (child)
+                'hjul': ['hjul', 'jul'], // "hjul" (wheel) vs "jul" (christmas)
+                'lås': ['lås', 'loss'], // "lås" (lock) vs "loss" (loose/untie)
+            },
+            'en-US': {
+                'read': ['read', 'red'], // Read (present) vs Red
+                'to': ['to', 'two', 'too'], // To, Two, Too
+                'bear': ['bear', 'bare'], // Bear (animal) vs Bare (naked)
+                'flower': ['flower', 'flour'], // Flower vs Flour
+                'know': ['know', 'no'], // Know vs No
+                'right': ['right', 'write'], // Right vs Write
+            }
+            // Lägg till fler språk och homografer här
+        };
 
         function initSpeechRecognition() {
             if (!SpeechRecognition) {
@@ -238,23 +289,36 @@
 
             recognition = new SpeechRecognition();
             recognition.continuous = false;
-            recognition.lang = currentLanguage; // Sätt språk här
+            recognition.lang = currentLanguage;
             recognition.interimResults = false;
-            recognition.maxAlternatives = 1;
+            recognition.maxAlternatives = 5; // Öka för att få fler alternativa resultat
 
             recognition.onresult = (event) => {
                 isListening = false;
-                const speechResult = event.results[0][0].transcript.trim(); // Behåll som det är, jämför sedan case-insensitivt
-                console.log('Taligenkänningsresultat (hört):', speechResult);
-                handleSpeechResult(speechResult);
+                clearTimeout(speechTimeout); // Stoppa automatisk framåt om ett resultat kommer
+                
+                const results = Array.from(event.results);
+                const alternatives = results[0] ? Array.from(results[0]) : [];
+                
+                const spokenTexts = alternatives.map(alt => alt.transcript.trim());
+                console.log('Taligenkänningsresultat (hört):', spokenTexts);
+                handleSpeechResult(spokenTexts); // Skicka alla talade alternativ
             };
 
             recognition.onspeechend = () => {
                 console.log("Recognition onspeechend event fired.");
+                // Om onresult inte triggas direkt efter speechend, kan det vara 'no-speech'
+                if (isListening && gameActive) { // Kollar isListening ifall recognition stannade av någon annan anledning
+                    showMessage('Jag hörde inget. Försök igen!', 'text-yellow-600');
+                    listeningSpinner.classList.add('hidden');
+                    isListening = false;
+                    setTimeout(() => startListening(), 1000); // Försök lyssna igen
+                }
             };
 
             recognition.onerror = (event) => {
                 isListening = false;
+                clearTimeout(speechTimeout); // Stoppa automatisk framåt vid fel
                 console.error('Taligenkänningsfel:', event.error);
                 listeningSpinner.classList.add('hidden');
 
@@ -267,10 +331,17 @@
                     showMessage('Mikrofonåtkomst nekades. Spelet kräver mikrofon för att fungera. Vänligen kontrollera webbläsarens inställningar (oftast under "Webbplatsinställningar" eller "Sekretess och säkerhet") och tillåt mikrofonåtkomst för denna sida.', 'text-red-600');
                     gameActive = false;
                     nextWordBtn.classList.remove('hidden');
+                    skipWordBtn.classList.remove('hidden'); // Visa knapparna så spelet inte låser sig
                     promptText.classList.add('hidden');
                     startNewGameBtn.disabled = true;
                     startNewGameBtn.classList.add('disabled-button');
-                } else {
+                } else if (event.error === 'network') {
+                     showMessage('Nätverksfel. Kontrollera din internetanslutning och försök igen.', 'text-red-600');
+                     if (gameActive) {
+                        setTimeout(() => startListening(), 1000);
+                    }
+                }
+                 else {
                     showMessage(`Ett oväntat fel uppstod med taligenkänningen: ${event.error}. Försök igen.`, 'text-red-600');
                     if (gameActive) {
                         setTimeout(() => startListening(), 1000);
@@ -280,8 +351,11 @@
 
             recognition.onend = () => {
                 console.log("Recognition onend event fired.");
-                isListening = false;
-                if (gameActive && nextWordBtn.classList.contains('hidden')) {
+                // isListening sätts till false i onresult/onerror.
+                // Denna onend kan triggas efter onresult/onerror.
+                // Om isListening fortfarande är true här (vilket inte bör hända om onresult/onerror sätter den till false),
+                // då innebär det att recognition avslutades utan resultat/fel, dvs. en tyst period.
+                if (isListening && gameActive && !isPaused) { // Bara fortsätt lyssna om inte pausad
                     setTimeout(() => {
                         startListening();
                     }, 500);
@@ -304,22 +378,37 @@
                 console.log("Already listening, not starting new recognition.");
                 return;
             }
+            if (isPaused) { // Förhindra att lyssna om spelet är pausat
+                console.log("Game is paused, not starting recognition.");
+                return;
+            }
             try {
-                // Uppdatera språket innan vi börjar lyssna
                 recognition.lang = currentLanguage;
                 recognition.start();
                 isListening = true;
                 showMessage('Lyssna...', 'text-blue-600');
                 listeningSpinner.classList.remove('hidden');
                 console.log("Recognition started for word:", currentWord);
+                
+                // Starta en timeout för att gå vidare om inget tal upptäcks
+                speechTimeout = setTimeout(() => {
+                    if (isListening && gameActive && !isPaused) { // Se till att vi fortfarande lyssnar och spelet är aktivt
+                        recognition.stop(); // Stoppa det nuvarande lyssnandet
+                        showMessage('Hörde inget, försök igen.', 'text-yellow-600');
+                        // Lägg till en kort fördröjning innan vi försöker lyssna igen
+                        setTimeout(() => startListening(), 1500);
+                    }
+                }, 5000); // 5 sekunder timeout för att reagera
             } catch (e) {
                 console.error("Fel vid start av taligenkänning:", e);
                 isListening = false;
+                clearTimeout(speechTimeout);
                 if (e.name === 'InvalidStateError') {
                     showMessage('Taligenkänning är redan aktiv eller i ett ogiltigt tillstånd.', 'text-gray-500');
                 } else {
                     showMessage('Kunde inte starta mikrofonen. Försök igen.', 'text-red-600');
                     nextWordBtn.classList.remove('hidden');
+                    skipWordBtn.classList.remove('hidden'); // Visa knapparna
                     promptText.classList.add('hidden');
                 }
             }
@@ -330,6 +419,7 @@
                 recognition.stop();
                 isListening = false;
                 listeningSpinner.classList.add('hidden');
+                clearTimeout(speechTimeout); // Rensa timeout vid manuellt stopp
                 console.log("Recognition stopped.");
             }
         }
@@ -354,51 +444,90 @@
         }
 
         function getNextWord() {
-            // Prioritera ord som eleven har svarat fel på
-            const incorrectWords = wordsToPractice.filter(word => attempts[word] && attempts[word].correct === 0 && attempts[word].total > 0);
-            if (incorrectWords.length > 0) {
-                console.log("Prioritizing incorrect word:", incorrectWords[0]);
-                return incorrectWords[Math.floor(Math.random() * incorrectWords.length)];
+            // Repetera felaktiga ord först
+            const wordsToRepeat = wordsToPractice.filter(word => 
+                attempts[word] && 
+                attempts[word].correct === 0 && 
+                attempts[word].total > 0 && 
+                !attempts[word].skipped // Repetera inte överhoppade ord direkt
+            );
+
+            if (wordsToRepeat.length > 0) {
+                const word = wordsToRepeat[Math.floor(Math.random() * wordsToRepeat.length)];
+                console.log("Prioritizing word to repeat:", word);
+                return word;
             }
 
-            // Filtrera bort redan klarade ord från userWords för att få nya att öva på
+            // Sedan nya ord som inte klarats eller övats på
             const unmasteredWords = userWords.filter(word => !masteredWords.has(word));
             if (unmasteredWords.length > 0) {
-                const randomIndex = Math.floor(Math.random() * unmasteredWords.length);
-                return unmasteredWords[randomIndex];
+                const word = unmasteredWords[Math.floor(Math.random() * unmasteredWords.length)];
+                console.log("Selecting new unmastered word:", word);
+                return word;
             }
             
-            // Om alla ord är klarade, men vi fortfarande har ord i wordsToPractice som är felaktiga, spela dem igen.
-            if (wordsToPractice.length > 0) {
-                const randomIndex = Math.floor(Math.random() * wordsToPractice.length);
-                return wordsToPractice[randomIndex];
+            // Om alla ord är klarade, eller inga nya finns, kolla om det finns överhoppade ord att repetera
+            // Om alla ord är klarade, och inga oklara/överhoppade ord finns kvar
+            const allWordsAttempted = userWords.every(word => attempts[word] && attempts[word].total > 0);
+            const allWordsMastered = userWords.every(word => masteredWords.has(word) || (attempts[word] && attempts[word].skipped));
+
+            if (allWordsMastered && allWordsAttempted) {
+                console.log("All words mastered/attempted. Game ending.");
+                return null; // Alla ord har övats och antingen klarats eller hoppats över
             }
 
-            console.log("All words mastered. Game ending.");
+            // Detta fallback-scenario bör fånga eventuella kvarvarande ord att öva om logiken ovan missar något
+            if (wordsToPractice.length > 0) {
+                const randomIndex = Math.floor(Math.random() * wordsToPractice.length);
+                const word = wordsToPractice[randomIndex];
+                console.log("Selecting random word from practice list:", word);
+                return word;
+            }
+
+            console.log("No more words to practice. Game ending.");
             return null;
         }
 
-        function handleSpeechResult(spokenText) {
-            nextWordBtn.classList.remove('hidden');
+        function handleSpeechResult(spokenTexts) {
+            stopListening(); // Stoppa lyssnandet direkt när resultat kommer
+            clearTimeout(speechTimeout); // Rensa timeout för att undvika dubbla anrop
             
-            if (!attempts[currentWord]) {
-                attempts[currentWord] = { correct: 0, total: 0 };
-            }
-            attempts[currentWord].total++;
-
-            // Normalisera för jämförelse (både det talade och det förväntade ordet till gemener)
-            const normalizedSpokenText = spokenText.trim().toLowerCase();
+            // Normalisera det förväntade ordet för jämförelse
             const normalizedCurrentWord = currentWord.trim().toLowerCase();
 
             let isCorrect = false;
+            let recognizedHomograph = null;
 
-            // Enkel jämförelse
-            if (normalizedSpokenText === normalizedCurrentWord) {
-                isCorrect = true;
+            // Kontrollera om något av de talade alternativen matchar det förväntade ordet
+            // eller någon av dess homografer
+            for (const spokenText of spokenTexts) {
+                const normalizedSpokenText = spokenText.trim().toLowerCase();
+
+                if (normalizedSpokenText === normalizedCurrentWord) {
+                    isCorrect = true;
+                    break; // Hittade en direkt matchning
+                }
+
+                // Kontrollera för homografer
+                const homographs = homographMap[currentLanguage] ? homographMap[currentLanguage][normalizedCurrentWord] : null;
+                if (homographs && homographs.includes(normalizedSpokenText)) {
+                    isCorrect = true;
+                    recognizedHomograph = spokenText; // Spara den erkända homografen
+                    break; // Hittade en matchning med en homograf
+                }
             }
+            
+            if (!attempts[currentWord]) {
+                attempts[currentWord] = { correct: 0, total: 0, skipped: false };
+            }
+            attempts[currentWord].total++;
 
             if (isCorrect) {
-                showMessage('Rätt! Bra jobbat!', 'text-green-600');
+                if (recognizedHomograph) {
+                    showMessage(`Rätt! Jag hörde "${recognizedHomograph}" (en homograf till "${currentWord}"). Bra jobbat!`, 'text-yellow-600');
+                } else {
+                    showMessage('Rätt! Bra jobbat!', 'text-green-600');
+                }
                 updateStars(1);
                 attempts[currentWord].correct++;
 
@@ -408,17 +537,23 @@
                     wordsToPractice = wordsToPractice.filter(word => word !== currentWord);
                     console.log(`Removed '${currentWord}' from practice list.`);
                 }
-
+                // Gå automatiskt till nästa ord efter en kort fördröjning
+                setTimeout(displayNextWord, 1500); // 1.5 sekunders fördröjning
+                nextWordBtn.classList.add('hidden'); // Dölj "Nästa ord"
+                skipWordBtn.classList.add('hidden'); // Dölj "Hoppa över"
             } else {
-                showMessage(`Jag hörde "${spokenText}". Försök igen!`, 'text-red-600');
+                showMessage(`Jag hörde "${spokenTexts[0] || 'inget tydligt'}". Försök igen!`, 'text-red-600');
                 updateStars(-1);
                 // Lägg till ordet i wordsToPractice om det inte redan finns där, för att öva mer
                 if (!wordsToPractice.includes(currentWord)) {
                     wordsToPractice.push(currentWord);
                     console.log(`Added '${currentWord}' back to practice list due to incorrect answer.`);
                 }
+                // Användaren får trycka på "Nästa ord" eller "Hoppa över" vid fel
+                nextWordBtn.classList.remove('hidden');
+                skipWordBtn.classList.remove('hidden');
             }
-            console.log(`Current word: ${currentWord}, Spoken: ${spokenText}, Correct: ${isCorrect}, Stars: ${stars}`);
+            console.log(`Current word: ${currentWord}, Spoken: ${spokenTexts.join(', ')}, Correct: ${isCorrect}, Stars: ${stars}`);
             console.log("Words to practice:", wordsToPractice);
             console.log("Mastered words:", masteredWords);
         }
@@ -430,7 +565,6 @@
                 return;
             }
 
-            // Dela upp glosorna baserat på komma eller ny rad och rensa tomma strängar
             userWords = glossaryInput.split(/,|\n/).map(word => word.trim()).filter(word => word.length > 0);
             
             if (userWords.length === 0) {
@@ -438,14 +572,28 @@
                 return;
             }
 
-            currentLanguage = languageSelect.value; // Hämta valt språk
-            recognition.lang = currentLanguage; // Uppdatera recognition-objektets språk
+            currentLanguage = languageSelect.value;
+            // Försök att få den mest passande rösten för det valda språket
+            // Notera: Röster varierar mellan webbläsare och operativsystem.
+            const voices = SpeechSynthesis.getVoices();
+            const selectedVoice = voices.find(voice => voice.lang === currentLanguage || voice.lang.startsWith(currentLanguage.split('-')[0])) || voices[0];
+            speechSynthesisUtterance.voice = selectedVoice; // Uppdatera röst för talsyntes
+
+            // Återinitiera recognition med nytt språk om det ändrats
+            if (!recognition || recognition.lang !== currentLanguage) {
+                initSpeechRecognition();
+            } else {
+                recognition.lang = currentLanguage;
+            }
+
 
             stars = 3;
             attempts = {};
             masteredWords.clear();
-            wordsToPractice = [...userWords]; // Fyll initiala ordlistan med användarens ord
+            wordsToPractice = [...userWords];
             gameActive = true;
+            isPaused = false;
+            pauseGameBtn.innerHTML = '<i class="fas fa-pause"></i> Paus'; // Återställ ikon
             console.log("Game started with user words. Language:", currentLanguage, "Words:", userWords);
 
             wordlistInputScreen.classList.add('hidden');
@@ -457,6 +605,10 @@
         }
 
         function displayNextWord() {
+            if (isPaused) { // Om spelet är pausat, hoppa inte till nästa ord
+                return;
+            }
+
             currentWord = getNextWord();
 
             if (currentWord === null) {
@@ -466,39 +618,117 @@
 
             wordDisplay.textContent = currentWord;
             nextWordBtn.classList.add('hidden');
-            
+            skipWordBtn.classList.remove('hidden'); // Visa hoppa över-knappen
+
             speechInputUI.classList.remove('hidden');
+            promptText.classList.remove('hidden'); // Visa prompttexten
             showMessage('Säg ordet:', 'text-blue-600');
             startListening();
         }
 
+        function skipWord() {
+            if (!attempts[currentWord]) {
+                attempts[currentWord] = { correct: 0, total: 0, skipped: false };
+            }
+            attempts[currentWord].total++;
+            attempts[currentWord].skipped = true; // Markera som överhoppad
+            showMessage(`Ordet "${currentWord}" hoppades över.`, 'text-gray-600');
+            updateStars(-1); // Kostar en stjärna att hoppa över
+
+            // Ta bort från wordsToPractice så det inte väljs slumpmässigt igen i onödan
+            wordsToPractice = wordsToPractice.filter(word => word !== currentWord);
+
+            setTimeout(displayNextWord, 1000); // Gå till nästa ord efter en kort fördröjning
+            nextWordBtn.classList.add('hidden'); // Dölj "Nästa ord"
+            skipWordBtn.classList.add('hidden'); // Dölj "Hoppa över"
+        }
+
+        function togglePauseGame() {
+            isPaused = !isPaused;
+            if (isPaused) {
+                stopListening();
+                showMessage('Spelet pausat.', 'text-gray-500');
+                promptText.classList.add('hidden'); // Dölj "Säg ordet"
+                pauseGameBtn.innerHTML = '<i class="fas fa-play"></i> Fortsätt'; // Ändra ikon
+                nextWordBtn.classList.remove('hidden'); // Tillåt manuell nästa vid paus
+                skipWordBtn.classList.add('hidden'); // Dölj hoppa över under paus
+            } else {
+                showMessage('Spelet återupptas...', 'text-blue-600');
+                promptText.classList.remove('hidden');
+                pauseGameBtn.innerHTML = '<i class="fas fa-pause"></i> Paus'; // Ändra ikon
+                nextWordBtn.classList.add('hidden'); // Dölj nästa ord igen
+                skipWordBtn.classList.remove('hidden'); // Visa hoppa över igen
+                startListening();
+            }
+        }
+
         function stopGame() {
             gameActive = false;
+            isPaused = false; // Se till att spelet inte är pausat
             stopListening();
+            clearTimeout(speechTimeout); // Rensa eventuell väntande timeout
             gameScreen.classList.add('hidden');
             resultsScreen.classList.remove('hidden');
             showResults();
             console.log("Game stopped. Final stars:", stars);
         }
 
+        // För talsyntes i resultatlistan
+        const speechSynthesisUtterance = new SpeechSynthesisUtterance();
+        speechSynthesisUtterance.volume = 1; // 0 till 1
+        speechSynthesisUtterance.rate = 1;    // 0.1 till 10
+        speechSynthesisUtterance.pitch = 1;   // 0 till 2
+
+        function speakWord(word, lang) {
+            speechSynthesisUtterance.text = word;
+            speechSynthesisUtterance.lang = lang; // Använd det valda språket
+            
+            // Hämta röster och välj den mest passande
+            const voices = SpeechSynthesis.getVoices();
+            const selectedVoice = voices.find(voice => voice.lang === lang || voice.lang.startsWith(lang.split('-')[0])) || voices[0];
+            speechSynthesisUtterance.voice = selectedVoice;
+
+            SpeechSynthesis.speak(speechSynthesisUtterance);
+        }
+
         function showResults() {
             attemptsList.innerHTML = '';
-            // Visa alla ord som har varit med i spelet, sorterade
-            const sortedWords = Object.keys(attempts).sort();
+            const allWordsInGame = [...new Set([...userWords, ...Object.keys(attempts)])].sort(); // Inkludera alla ord som övades
 
-            if (sortedWords.length === 0) {
+            if (allWordsInGame.length === 0) {
                 const listItem = document.createElement('li');
                 listItem.textContent = 'Inga ord övades under denna omgång.';
                 attemptsList.appendChild(listItem);
             } else {
-                sortedWords.forEach(word => {
-                    const data = attempts[word];
+                allWordsInGame.forEach(word => {
+                    const data = attempts[word] || { correct: 0, total: 0, skipped: false };
                     const listItem = document.createElement('li');
+                    
+                    let statusText = '';
+                    if (data.skipped) {
+                        statusText = 'Överhoppad';
+                    } else if (data.total === 0) {
+                        statusText = 'Ej övad';
+                    } else {
+                        statusText = `Försök: ${data.total} (${data.correct} rätt)`;
+                    }
+
                     listItem.innerHTML = `
                         <span>${word}</span>
-                        <span>Försök: ${data.total} (${data.correct} rätt)</span>
+                        <div class="flex items-center gap-2">
+                            <span>${statusText}</span>
+                            <button class="btn btn-blue btn-small speak-btn" data-word="${word}"><i class="fas fa-volume-up"></i></button>
+                        </div>
                     `;
                     attemptsList.appendChild(listItem);
+                });
+
+                // Lägg till eventlyssnare för "lyssna"-knapparna
+                document.querySelectorAll('.speak-btn').forEach(button => {
+                    button.addEventListener('click', (event) => {
+                        const wordToSpeak = event.currentTarget.dataset.word;
+                        speakWord(wordToSpeak, currentLanguage);
+                    });
                 });
             }
             finalStars.textContent = stars;
@@ -509,30 +739,40 @@
         startNewGameBtn.addEventListener('click', () => {
             startScreen.classList.add('hidden');
             wordlistInputScreen.classList.remove('hidden');
-            glossaryTextarea.value = ''; // Rensa textarea
+            glossaryTextarea.value = '';
+            // Se till att språket är korrekt inställt från början
+            languageSelect.value = currentLanguage; 
         });
 
         startGlossaryGameBtn.addEventListener('click', startGameFromWordlist);
         stopGameBtn.addEventListener('click', stopGame);
+        pauseGameBtn.addEventListener('click', togglePauseGame); // Ny eventlyssnare
+        skipWordBtn.addEventListener('click', skipWord); // Ny eventlyssnare
+
+        // nextWordBtn är nu oftast dold, men finns kvar för manuell frammatning vid fel
         nextWordBtn.addEventListener('click', displayNextWord);
         
         playAgainBtn.addEventListener('click', () => {
             resultsScreen.classList.add('hidden');
             startScreen.classList.remove('hidden');
-            // Återställ spelet helt för en ny omgång
+            
             stars = 3;
             attempts = {};
             masteredWords.clear();
             userWords = [];
             wordsToPractice = [];
             gameActive = false;
-            // Återaktivera startknappen om den inaktiverades pga mikrofonfel
+            isPaused = false;
+            clearTimeout(speechTimeout); // Rensa timeout vid omstart
+            pauseGameBtn.innerHTML = '<i class="fas fa-pause"></i> Paus'; // Återställ ikon
+
             startNewGameBtn.disabled = false;
             startNewGameBtn.classList.remove('disabled-button');
 
             showMessage('', 'text-blue-600');
             wordDisplay.textContent = '';
-            initSpeechRecognition(); // Försök initiera taligenkänning igen (kan vara bra om språket ändrats)
+            // Initiera taligenkänning igen för att säkerställa att språket är korrekt
+            initSpeechRecognition(); 
             console.log("Game reset. Ready to play again.");
         });
 
